@@ -1,0 +1,24 @@
+# Python
+backend/.venv/
+backend/.pytest_cache/
+backend/**/__pycache__/
+backend/*.sqlite3
+backend/.env
+
+# Node
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/.env
+
+# IDE
+.vscode/
+__pycache__/
+*.pyc
+*.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts
+
+# OS
+.DS_Store
+Thumbs.db
