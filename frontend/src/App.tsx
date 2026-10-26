@@ -1,309 +1,114 @@
-import { useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 
-type Product = {
-  id: number;
-  sku: string;
-  name: string;
-  category: string;
-  selling_price: string;
-  cost_price: string;
-  stock_quantity: number;
-  reorder_level: number;
-  is_active: boolean;
-};
+type Product = { id: number; sku: string; name: string; category: string; selling_price: string; cost_price: string; stock_quantity: number; reorder_level: number; is_active: boolean };
+type Customer = { id: number; name: string; phone: string; email: string; loyalty_points: number; is_active: boolean };
+type SaleItem = { id: number; product: number; product_name: string; product_sku: string; quantity: number; unit_price: string; line_total: string };
+type Sale = { id: number; invoice_number: string; customer: number | null; customer_name: string; sold_at: string; subtotal: string; tax_amount: string; total: string; status: string; items: SaleItem[] };
+type DailySale = { date: string; revenue: string };
+type Summary = { total_revenue: string; today_revenue: string; tax_rate: string; total_products: number; active_customers: number; low_stock_alerts: number; sales_count: number; today_sales_count: number; best_selling_product: { items__product__id: number; items__product__name: string; quantity_sold: number; revenue: string } | null; daily_sales: DailySale[]; recent_sales: Sale[] };
+type ProductDraft = Omit<Product, "id">;
+type CustomerDraft = Omit<Customer, "id">;
+type CartLine = { product: Product; quantity: number };
 
-type Customer = {
-  id: number;
-  name: string;
-  phone: string;
-  email: string;
-  loyalty_points: number;
-  is_active: boolean;
-};
+const API = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000/api/v1";
+const navigation = [{ label: "Dashboard", icon: "▦" }, { label: "POS Register", icon: "▣" }, { label: "Products", icon: "⬡" }, { label: "Customers", icon: "♙" }, { label: "Sales", icon: "▤" }, { label: "Reports", icon: "▥" }];
+const money = (v: string | number) => `Rs. ${Number(v || 0).toLocaleString("en-LK", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const blankProduct: ProductDraft = { sku: "", name: "", category: "General", cost_price: "0.00", selling_price: "0.00", stock_quantity: 0, reorder_level: 5, is_active: true };
+const blankCustomer: CustomerDraft = { name: "", phone: "", email: "", loyalty_points: 0, is_active: true };
 
-type Sale = {
-  id: number;
-  invoice_number: string;
-  customer_name: string;
-  sold_at: string;
-  subtotal: string;
-  tax_amount: string;
-  total: string;
-  status: string;
-};
-
-type DashboardSummary = {
-  total_revenue: number;
-  total_products: number;
-  active_customers: number;
-  low_stock_alerts: number;
-  sales_count: number;
-  recent_sales: Sale[];
-};
-
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000/api/v1";
-
-function formatCurrency(value: number | string): string {
-  return Number(value).toLocaleString(undefined, {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  });
-}
-
-async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    headers: {
-      "Content-Type": "application/json",
-      ...(init?.headers || {}),
-    },
-    ...init,
-  });
-
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(text || `Request failed: ${response.status}`);
+async function api<T>(path: string, init?: RequestInit): Promise<T> {
+  const request = (token?: string) => fetch(`${API}${path}`, { headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}), ...init?.headers }, ...init });
+  let response = await request(localStorage.getItem("pos_access") ?? undefined);
+  if (response.status === 401 && !path.startsWith("/auth/token")) {
+    const refresh = localStorage.getItem("pos_refresh");
+    if (refresh) {
+      try {
+        const renewed = await fetch(`${API}/auth/token/refresh/`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ refresh }) });
+        if (renewed.ok) { const tokens = await renewed.json() as { access: string; refresh?: string }; localStorage.setItem("pos_access", tokens.access); if (tokens.refresh) localStorage.setItem("pos_refresh", tokens.refresh); response = await request(tokens.access); }
+        else { localStorage.removeItem("pos_access"); localStorage.removeItem("pos_refresh"); window.dispatchEvent(new Event("pos:unauthorized")); }
+      } catch { localStorage.removeItem("pos_access"); localStorage.removeItem("pos_refresh"); window.dispatchEvent(new Event("pos:unauthorized")); }
+    } else { window.dispatchEvent(new Event("pos:unauthorized")); }
   }
-
-  return (await response.json()) as T;
+  if (!response.ok) {
+    let message = `Request failed (${response.status})`;
+    try { const body = await response.json(); message = Object.entries(body).map(([key, value]) => `${key}: ${Array.isArray(value) ? value.join(", ") : String(value)}`).join(" · ") || message; } catch { /* use status message */ }
+    throw new Error(message);
+  }
+  return response.status === 204 ? (undefined as T) : await response.json() as T;
 }
 
 function App() {
-  const [products, setProducts] = useState<Product[]>([]);
-  const [customers, setCustomers] = useState<Customer[]>([]);
-  const [summary, setSummary] = useState<DashboardSummary | null>(null);
-  const [selectedProductId, setSelectedProductId] = useState<number | "">("");
-  const [selectedCustomerId, setSelectedCustomerId] = useState<number | "">("");
-  const [quantity, setQuantity] = useState(1);
-  const [message, setMessage] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [authenticated, setAuthenticated] = useState(() => Boolean(localStorage.getItem("pos_access")));
+  const [loginName, setLoginName] = useState(""); const [loginPassword, setLoginPassword] = useState(""); const [loginError, setLoginError] = useState("");
+  const [products, setProducts] = useState<Product[]>([]); const [customers, setCustomers] = useState<Customer[]>([]); const [summary, setSummary] = useState<Summary | null>(null); const [sales, setSales] = useState<Sale[]>([]); const [salesLoading, setSalesLoading] = useState(false);
+  const [page, setPage] = useState("Dashboard"); const [loading, setLoading] = useState(true); const [busy, setBusy] = useState(false); const [message, setMessage] = useState(""); const [apiOnline, setApiOnline] = useState(false);
+  const [modal, setModal] = useState<"sale" | "product" | "customer" | null>(null); const [productDraft, setProductDraft] = useState<ProductDraft>(blankProduct); const [customerDraft, setCustomerDraft] = useState<CustomerDraft>(blankCustomer);
+  const [editingProductId, setEditingProductId] = useState<number | null>(null); const [editingCustomerId, setEditingCustomerId] = useState<number | null>(null);
+  const [cart, setCart] = useState<CartLine[]>([]); const [cartProduct, setCartProduct] = useState(""); const [cartQuantity, setCartQuantity] = useState(1); const [saleCustomer, setSaleCustomer] = useState("");
+  const [search, setSearch] = useState(""); const [reportFrom, setReportFrom] = useState(""); const [reportTo, setReportTo] = useState("");
 
-  const productOptions = useMemo(
-    () => products.filter((product) => product.is_active !== false),
-    [products],
-  );
-
-  const selectedProduct = products.find((product) => product.id === Number(selectedProductId)) ?? null;
-
-  const refreshData = async () => {
-    const [productResponse, customerResponse, dashboardResponse] = await Promise.all([
-      fetchJson<Product[]>("/products/"),
-      fetchJson<Customer[]>("/customers/"),
-      fetchJson<DashboardSummary>("/dashboard/"),
-    ]);
-
-    setProducts(productResponse);
-    setCustomers(customerResponse);
-    setSummary(dashboardResponse);
-  };
-
-  useEffect(() => {
-    void refreshData().catch((error: unknown) => {
-      setMessage(error instanceof Error ? error.message : "Unable to load POS data.");
-    });
-  }, []);
-
-  const handleQuickSale = async (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-
-    if (!selectedProductId) {
-      setMessage("Select a product before creating a sale.");
-      return;
-    }
-
+  const refresh = useCallback(async () => {
     setLoading(true);
-    try {
-      await fetchJson("/sales/", {
-        method: "POST",
-        body: JSON.stringify({
-          customer: selectedCustomerId || null,
-          items: [{ product: Number(selectedProductId), quantity }],
-        }),
-      });
-      setMessage(`Sale created for ${selectedProduct?.name} x ${quantity}.`);
-      setSelectedCustomerId("");
-      setSelectedProductId("");
-      setQuantity(1);
-      await refreshData();
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Unable to create the sale.");
-    } finally {
-      setLoading(false);
-    }
-  };
+    try { const [p, c, d] = await Promise.all([api<Product[]>("/products/"), api<Customer[]>("/customers/"), api<Summary>("/dashboard/")]); setProducts(p); setCustomers(c); setSummary(d); setApiOnline(true); }
+    catch (e) { setApiOnline(false); setMessage(e instanceof Error ? e.message : "Could not connect to the POS API."); }
+    finally { setLoading(false); }
+  }, []);
+  useEffect(() => { if (authenticated) void refresh(); else setLoading(false); }, [authenticated, refresh]);
+  useEffect(() => { if (authenticated && (page === "Sales" || page === "Reports")) { setSalesLoading(true); void api<Sale[]>("/sales/").then(setSales).catch(e => setMessage(e instanceof Error ? e.message : "Could not load sales.")).finally(() => setSalesLoading(false)); } }, [authenticated, page, summary?.sales_count]);
+  useEffect(() => { const onUnauthorized = () => setAuthenticated(false); window.addEventListener("pos:unauthorized", onUnauthorized); return () => window.removeEventListener("pos:unauthorized", onUnauthorized); }, []);
+  const signIn = async (e: FormEvent) => { e.preventDefault(); setLoginError(""); try { const tokens = await api<{ access: string; refresh: string }>("/auth/token/", { method: "POST", body: JSON.stringify({ username: loginName, password: loginPassword }) }); localStorage.setItem("pos_access", tokens.access); localStorage.setItem("pos_refresh", tokens.refresh); setAuthenticated(true); } catch { setLoginError("Sign-in failed. Check your username and password."); } };
+  const signOut = () => { localStorage.removeItem("pos_access"); localStorage.removeItem("pos_refresh"); setAuthenticated(false); setProducts([]); setCustomers([]); setSummary(null); setPage("Dashboard"); };
+  const available = useMemo(() => products.filter(p => p.is_active && p.stock_quantity > 0), [products]);
+  const filteredProducts = products.filter(p => `${p.name} ${p.sku} ${p.category}`.toLowerCase().includes(search.toLowerCase()));
+  const filteredCustomers = customers.filter(c => `${c.name} ${c.email} ${c.phone}`.toLowerCase().includes(search.toLowerCase()));
+  const filteredSales = sales.filter(s => { const day = s.sold_at.slice(0, 10); return (!reportFrom || day >= reportFrom) && (!reportTo || day <= reportTo); });
+  const subtotal = cart.reduce((sum, line) => sum + Number(line.product.selling_price) * line.quantity, 0);
+  const TAX_RATE = Number(summary?.tax_rate ?? 0.1);
 
-  return (
-    <div className="min-h-screen bg-slate-950 text-slate-100">
-      <div className="mx-auto max-w-7xl p-6">
-        <header className="mb-8 flex items-center justify-between gap-4 border-b border-slate-700 pb-4">
-          <div>
-            <p className="text-sm uppercase tracking-[0.32em] text-cyan-400">Enterprise POS</p>
-            <h1 className="mt-2 text-3xl font-bold">Operations dashboard</h1>
-          </div>
-          <div className="rounded-full border border-emerald-500/40 bg-emerald-500/10 px-3 py-1 text-sm text-emerald-300">
-            Live system status
-          </div>
-        </header>
+  if (!authenticated) return <div className="login-screen"><form className="login-card" onSubmit={signIn}><div className="brand login-brand"><span className="brand-mark">∞</span><span>Link<span className="brand-pos">POS</span></span></div><p className="eyebrow">SECURE ACCESS</p><h1>Welcome back</h1><p className="subtitle">Sign in with your POS account to continue.</p><label>Username<input required autoComplete="username" value={loginName} onChange={e => setLoginName(e.target.value)}/></label><label>Password<input required type="password" autoComplete="current-password" value={loginPassword} onChange={e => setLoginPassword(e.target.value)}/></label>{loginError && <p className="login-error" role="alert">{loginError}</p>}<button className="submit-sale">Sign in</button><small>Create staff accounts with Django admin before using the POS.</small></form></div>;
 
-        <section className="mb-8 grid gap-4 md:grid-cols-4">
-          <div className="rounded-2xl border border-slate-700 bg-slate-900 p-4 shadow-lg shadow-slate-950/30">
-            <p className="text-sm text-slate-400">Total revenue</p>
-            <p className="mt-4 text-3xl font-semibold text-cyan-300">
-              ${formatCurrency(summary?.total_revenue ?? 0)}
-            </p>
-          </div>
-          <div className="rounded-2xl border border-slate-700 bg-slate-900 p-4 shadow-lg shadow-slate-950/30">
-            <p className="text-sm text-slate-400">Products</p>
-            <p className="mt-4 text-3xl font-semibold text-violet-300">{summary?.total_products ?? 0}</p>
-          </div>
-          <div className="rounded-2xl border border-slate-700 bg-slate-900 p-4 shadow-lg shadow-slate-950/30">
-            <p className="text-sm text-slate-400">Active customers</p>
-            <p className="mt-4 text-3xl font-semibold text-emerald-300">{summary?.active_customers ?? 0}</p>
-          </div>
-          <div className="rounded-2xl border border-slate-700 bg-slate-900 p-4 shadow-lg shadow-slate-950/30">
-            <p className="text-sm text-slate-400">Low stock alerts</p>
-            <p className="mt-4 text-3xl font-semibold text-amber-300">{summary?.low_stock_alerts ?? 0}</p>
-          </div>
-        </section>
+  const submitProduct = async (e: FormEvent) => { e.preventDefault(); setBusy(true); try { await api<Product>(editingProductId ? `/products/${editingProductId}/` : "/products/", { method: editingProductId ? "PATCH" : "POST", body: JSON.stringify({ ...productDraft, cost_price: Number(productDraft.cost_price), selling_price: Number(productDraft.selling_price), stock_quantity: Number(productDraft.stock_quantity), reorder_level: Number(productDraft.reorder_level) }) }); setModal(null); setProductDraft(blankProduct); setEditingProductId(null); setMessage(editingProductId ? "Product updated." : "Product added."); await refresh(); } catch (error) { setMessage(error instanceof Error ? error.message : "Could not save product."); } finally { setBusy(false); } };
+  const submitCustomer = async (e: FormEvent) => { e.preventDefault(); setBusy(true); try { await api<Customer>(editingCustomerId ? `/customers/${editingCustomerId}/` : "/customers/", { method: editingCustomerId ? "PATCH" : "POST", body: JSON.stringify({ ...customerDraft, loyalty_points: Number(customerDraft.loyalty_points) }) }); setModal(null); setCustomerDraft(blankCustomer); setEditingCustomerId(null); setMessage(editingCustomerId ? "Customer updated." : "Customer added."); await refresh(); } catch (error) { setMessage(error instanceof Error ? error.message : "Could not save customer."); } finally { setBusy(false); } };
+  const editProduct = (product: Product) => { setEditingProductId(product.id); setProductDraft({ sku: product.sku, name: product.name, category: product.category, cost_price: product.cost_price, selling_price: product.selling_price, stock_quantity: product.stock_quantity, reorder_level: product.reorder_level, is_active: product.is_active }); setModal("product"); };
+  const editCustomer = (customer: Customer) => { setEditingCustomerId(customer.id); setCustomerDraft({ name: customer.name, phone: customer.phone, email: customer.email, loyalty_points: customer.loyalty_points, is_active: customer.is_active }); setModal("customer"); };
+  const addToCart = () => { const product = products.find(p => p.id === Number(cartProduct)); if (!product || cartQuantity < 1) return; const current = cart.find(x => x.product.id === product.id)?.quantity ?? 0; if (current + cartQuantity > product.stock_quantity) { setMessage(`Only ${product.stock_quantity} ${product.name} in stock.`); return; } setCart(previous => { const existing = previous.find(x => x.product.id === product.id); return existing ? previous.map(x => x.product.id === product.id ? { ...x, quantity: x.quantity + cartQuantity } : x) : [...previous, { product, quantity: cartQuantity }]; }); setCartProduct(""); setCartQuantity(1); };
+  const completeSale = async (e: FormEvent) => { e.preventDefault(); if (!cart.length) return; setBusy(true); try { const sale = await api<Sale>("/sales/", { method: "POST", body: JSON.stringify({ customer: saleCustomer || null, items: cart.map(x => ({ product: x.product.id, quantity: x.quantity })) }) }); setCart([]); setSaleCustomer(""); setModal(null); setPage("Sales"); setMessage(`Sale ${sale.invoice_number} completed. Total ${money(sale.total)}.`); await refresh(); } catch (error) { setMessage(error instanceof Error ? error.message : "Could not complete sale."); } finally { setBusy(false); } };
+  const toggleProduct = async (product: Product) => { setBusy(true); try { await api(`/products/${product.id}/`, { method: "PATCH", body: JSON.stringify({ is_active: !product.is_active }) }); await refresh(); } catch (e) { setMessage(String(e)); } finally { setBusy(false); } };
+  const toggleCustomer = async (customer: Customer) => { setBusy(true); try { await api(`/customers/${customer.id}/`, { method: "PATCH", body: JSON.stringify({ is_active: !customer.is_active }) }); await refresh(); } catch (e) { setMessage(String(e)); } finally { setBusy(false); } };
+  const cancelSale = async (sale: Sale) => { if (!window.confirm(`Cancel ${sale.invoice_number} and return its items to stock?`)) return; setBusy(true); try { await api(`/sales/${sale.id}/cancel/`, { method: "POST" }); setMessage(`${sale.invoice_number} cancelled and stock restored.`); await refresh(); setSales(await api<Sale[]>("/sales/")); } catch (e) { setMessage(e instanceof Error ? e.message : "Could not cancel sale."); } finally { setBusy(false); } };
+  const exportCsv = () => { const rows = [["Invoice", "Date", "Customer", "Subtotal", "Tax", "Total", "Status"], ...filteredSales.map(s => [s.invoice_number, new Date(s.sold_at).toISOString(), s.customer_name, s.subtotal, s.tax_amount, s.total, s.status])]; const csv = rows.map(row => row.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(",")).join("\r\n"); const link = document.createElement("a"); const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" })); link.href = url; link.download = "pos-sales-report.csv"; link.click(); window.setTimeout(() => URL.revokeObjectURL(url), 0); };
 
-        <div className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
-          <div className="rounded-2xl border border-slate-700 bg-slate-900 p-5">
-            <div className="mb-4 flex items-center justify-between">
-              <h2 className="text-xl font-semibold">Products</h2>
-              <span className="text-sm text-slate-400">{products.length} records</span>
-            </div>
-            <div className="overflow-x-auto">
-              <table className="min-w-full text-left text-sm">
-                <thead className="text-slate-400">
-                  <tr>
-                    <th className="pb-3 pr-6">SKU</th>
-                    <th className="pb-3 pr-6">Name</th>
-                    <th className="pb-3 pr-6">Price</th>
-                    <th className="pb-3 pr-6">Stock</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {products.map((product) => (
-                    <tr key={product.id} className="border-t border-slate-800">
-                      <td className="py-3 pr-6 text-slate-300">{product.sku}</td>
-                      <td className="py-3 pr-6">{product.name}</td>
-                      <td className="py-3 pr-6">${formatCurrency(product.selling_price)}</td>
-                      <td className={`py-3 pr-6 ${product.stock_quantity <= product.reorder_level ? "text-amber-300" : "text-emerald-300"}`}>
-                        {product.stock_quantity}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          <form onSubmit={handleQuickSale} className="rounded-2xl border border-slate-700 bg-slate-900 p-5">
-            <h2 className="mb-4 text-xl font-semibold">Quick sale</h2>
-            <div className="space-y-4">
-              <label className="block">
-                <span className="mb-2 block text-sm text-slate-400">Product</span>
-                <select
-                  value={selectedProductId}
-                  onChange={(event) => setSelectedProductId(event.target.value === "" ? "" : Number(event.target.value))}
-                  className="w-full rounded-xl border border-slate-600 bg-slate-800 px-3 py-2 text-slate-100 outline-none transition focus:border-cyan-500"
-                >
-                  <option value="">Select a product</option>
-                  {productOptions.map((product) => (
-                    <option key={product.id} value={product.id}>
-                      {product.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <label className="block">
-                <span className="mb-2 block text-sm text-slate-400">Customer</span>
-                <select
-                  value={selectedCustomerId}
-                  onChange={(event) => setSelectedCustomerId(event.target.value === "" ? "" : Number(event.target.value))}
-                  className="w-full rounded-xl border border-slate-600 bg-slate-800 px-3 py-2 text-slate-100 outline-none transition focus:border-cyan-500"
-                >
-                  <option value="">Walk-in</option>
-                  {customers.map((customer) => (
-                    <option key={customer.id} value={customer.id}>
-                      {customer.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <label className="block">
-                <span className="mb-2 block text-sm text-slate-400">Quantity</span>
-                <input
-                  type="number"
-                  min={1}
-                  value={quantity}
-                  onChange={(event) => setQuantity(Math.max(1, Number(event.target.value) || 1))}
-                  className="w-full rounded-xl border border-slate-600 bg-slate-800 px-3 py-2 text-slate-100 outline-none transition focus:border-cyan-500"
-                />
-              </label>
-
-              <div className="rounded-xl bg-slate-800/70 p-3 text-sm text-slate-300">
-                {selectedProduct ? (
-                  <>
-                    <div className="flex items-center justify-between">
-                      <span>Unit price</span>
-                      <span>${formatCurrency(selectedProduct.selling_price)}</span>
-                    </div>
-                    <div className="mt-2 flex items-center justify-between font-medium text-cyan-300">
-                      <span>Estimated total (incl. 10% tax)</span>
-                      <span>${formatCurrency(Number(selectedProduct.selling_price) * quantity * 1.1)}</span>
-                    </div>
-                  </>
-                ) : (
-                  <span>Select a product to calculate the total.</span>
-                )}
-              </div>
-
-              <button
-                type="submit"
-                disabled={loading}
-                className="w-full rounded-xl bg-cyan-500 px-4 py-2 font-medium text-slate-950 transition hover:bg-cyan-400 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                {loading ? "Saving sale..." : "Create sale"}
-              </button>
-            </div>
-
-            {message && <p className="mt-4 rounded-xl border border-slate-700 bg-slate-800 p-3 text-sm text-slate-200">{message}</p>}
-          </form>
-        </div>
-
-        <section className="mt-8 rounded-2xl border border-slate-700 bg-slate-900 p-5">
-          <div className="mb-4 flex items-center justify-between">
-            <h2 className="text-xl font-semibold">Recent sales</h2>
-            <span className="text-sm text-slate-400">{summary?.sales_count ?? 0} total</span>
-          </div>
-          <div className="overflow-x-auto">
-            <table className="min-w-full text-left text-sm">
-              <thead className="text-slate-400">
-                <tr>
-                  <th className="pb-3 pr-6">Invoice</th>
-                  <th className="pb-3 pr-6">Customer</th>
-                  <th className="pb-3 pr-6">Date</th>
-                  <th className="pb-3 pr-6">Total</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(summary?.recent_sales ?? []).map((sale) => (
-                  <tr key={sale.id} className="border-t border-slate-800">
-                    <td className="py-3 pr-6 text-cyan-300">{sale.invoice_number}</td>
-                    <td className="py-3 pr-6">{sale.customer_name}</td>
-                    <td className="py-3 pr-6">{new Date(sale.sold_at).toLocaleDateString()}</td>
-                    <td className="py-3 pr-6 text-emerald-300">${formatCurrency(sale.total)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
-      </div>
-    </div>
-  );
+  return <div className="app-shell">
+    <header className="topbar"><button className="brand" onClick={() => setPage("Dashboard")} aria-label="Go to dashboard"><span className="brand-mark">∞</span><span>Link<span className="brand-pos">POS</span></span></button><span className="top-caption">Store operations</span><div className="top-actions"><span className={`connection-state ${apiOnline ? "" : "offline"}`}><i/>{apiOnline ? "API connected" : "API unavailable"}</span><span className="date-display">{new Intl.DateTimeFormat("en-LK", { weekday: "short", day: "2-digit", month: "short", year: "numeric" }).format(new Date())}<small>Asia/Colombo</small></span><button className="avatar" onClick={signOut} aria-label="Sign out" title="Sign out">P</button></div></header>
+    <aside className="sidebar"><nav aria-label="Main navigation">{navigation.map(item => <button key={item.label} className={`nav-item ${page === item.label ? "active" : ""}`} onClick={() => { setPage(item.label); setSearch(""); }}><span>{item.icon}</span>{item.label}</button>)}</nav><div className="side-footer"><span>LinkPOS</span><span>Inventory · Sales</span></div></aside>
+    <main className="main-content">
+      <div className="page-heading"><div><p className="eyebrow">STORE PERFORMANCE</p><h1>{page === "Dashboard" ? "Business overview" : page}</h1><p className="subtitle">{page === "Dashboard" ? "Live view of your sales, inventory and customers." : page === "POS Register" ? "Build a basket and complete a sale." : `Manage your ${page.toLowerCase()} records.`}</p></div><div className="heading-actions"><button className="refresh-button" onClick={() => void refresh()} disabled={loading}>↻ &nbsp;Refresh</button>{page === "POS Register" && <button className="register-button" onClick={() => setModal("sale")}>＋ New sale</button>}{page === "Products" && <button className="register-button" onClick={() => { setProductDraft(blankProduct); setEditingProductId(null); setModal("product"); }}>＋ Add product</button>}{page === "Customers" && <button className="register-button" onClick={() => { setCustomerDraft(blankCustomer); setEditingCustomerId(null); setModal("customer"); }}>＋ Add customer</button>}</div></div>
+      {message && <div className="toast-inline" role="status"><span>{message}</span><button onClick={() => setMessage("")} aria-label="Dismiss">×</button></div>}
+      {loading && <div className="loading-state">Connecting to POS services…</div>}
+      {!loading && page === "Dashboard" && <>
+        <section className="metric-grid"><Metric title="TODAY'S SALES" value={money(summary?.today_revenue ?? 0)} icon="↗" tone="teal"/><Metric title="COMPLETED TRANSACTIONS" value={summary?.today_sales_count ?? 0} icon="▤" tone="blue"/><Metric title="ACTIVE PRODUCTS" value={summary?.total_products ?? 0} icon="⬡" tone="violet"/><Metric title="LOW STOCK ALERTS" value={summary?.low_stock_alerts ?? 0} icon="!" tone="amber"/></section>
+        <section className="overview-grid"><article className="panel trend-panel"><div className="panel-heading"><h2>Sales · last 7 days</h2><button onClick={() => setPage("Reports")}>View report →</button></div><div className="chart-bars">{(summary?.daily_sales ?? []).map(day => { const max = Math.max(...(summary?.daily_sales ?? []).map(x => Number(x.revenue)), 1); return <div className="chart-column" key={day.date}><strong>{money(day.revenue)}</strong><i style={{ height: `${Math.max(4, Number(day.revenue) / max * 100)}%` }}/><span>{new Date(`${day.date}T12:00:00`).toLocaleDateString("en", { weekday: "short" })}</span></div>; })}</div></article>
+          <article className="panel today-panel"><div className="panel-heading"><h2>Sales snapshot</h2><button onClick={() => setPage("Sales")}>All sales →</button></div><div className="snapshot-stat"><span>All-time completed sales</span><strong>{money(summary?.total_revenue ?? 0)}</strong></div><div className="snapshot-stat"><span>Active customers</span><strong>{summary?.active_customers ?? 0}</strong></div><div className="snapshot-stat"><span>Best selling item</span><strong>{summary?.best_selling_product?.items__product__name ?? "No sales yet"}</strong></div><button className="wide-action" onClick={() => setModal("sale")}>＋ Start a sale</button></article></section>
+        <section className="lower-grid"><article className="panel inventory-panel"><div className="panel-heading"><h2>Stock watch</h2><button onClick={() => setPage("Products")}>Manage products →</button></div><DataTable headers={["PRODUCT", "SKU", "ON HAND", "STATUS"]}>{products.filter(p => p.stock_quantity <= p.reorder_level).slice(0, 5).map(p => <tr key={p.id}><td>{p.name}</td><td>{p.sku}</td><td>{p.stock_quantity}</td><td><span className="status-badge warning">Reorder</span></td></tr>)}</DataTable>{!summary?.low_stock_alerts && <p className="empty-note">All active products are above their reorder levels.</p>}</article><article className="panel sales-panel"><div className="panel-heading"><h2>Recent sales</h2><button onClick={() => setPage("Sales")}>View all →</button></div><SaleList sales={summary?.recent_sales.slice(0, 5) ?? []}/></article></section>
+      </>}
+      {!loading && page === "Products" && <section className="panel data-panel"><Toolbar search={search} setSearch={setSearch} placeholder="Search product, SKU or category"/><DataTable headers={["PRODUCT", "SKU", "CATEGORY", "SELL PRICE", "COST", "STOCK", "STATUS", "ACTION"]}>{filteredProducts.map(p => <tr key={p.id}><td><strong>{p.name}</strong></td><td>{p.sku}</td><td>{p.category}</td><td>{money(p.selling_price)}</td><td>{money(p.cost_price)}</td><td className={p.stock_quantity <= p.reorder_level ? "low-stock" : ""}>{p.stock_quantity}</td><td><span className={`status-badge ${p.is_active ? "success" : "muted"}`}>{p.is_active ? "Active" : "Archived"}</span></td><td><button className="text-action" disabled={busy} onClick={() => editProduct(p)}>Edit</button><button className="text-action" disabled={busy} onClick={() => void toggleProduct(p)}>{p.is_active ? "Archive" : "Activate"}</button></td></tr>)}</DataTable>{!filteredProducts.length && <p className="empty-note">No matching products. Add your first product to get started.</p>}</section>}
+      {!loading && page === "Customers" && <section className="panel data-panel"><Toolbar search={search} setSearch={setSearch} placeholder="Search customer, email or phone"/><DataTable headers={["CUSTOMER", "PHONE", "EMAIL", "LOYALTY POINTS", "STATUS", "ACTION"]}>{filteredCustomers.map(c => <tr key={c.id}><td><strong>{c.name}</strong></td><td>{c.phone || "—"}</td><td>{c.email || "—"}</td><td>{c.loyalty_points}</td><td><span className={`status-badge ${c.is_active ? "success" : "muted"}`}>{c.is_active ? "Active" : "Archived"}</span></td><td><button className="text-action" disabled={busy} onClick={() => editCustomer(c)}>Edit</button><button className="text-action" disabled={busy} onClick={() => void toggleCustomer(c)}>{c.is_active ? "Archive" : "Activate"}</button></td></tr>)}</DataTable>{!filteredCustomers.length && <p className="empty-note">No matching customers. Add a customer or complete a walk-in sale.</p>}</section>}
+      {!loading && page === "Sales" && <section className="panel data-panel"><div className="panel-heading section-toolbar"><h2>Transaction history</h2><button className="register-button" onClick={() => setModal("sale")}>＋ New sale</button></div>{salesLoading ? <p className="empty-note">Loading transaction history…</p> : <SaleList sales={sales} detailed onCancel={cancelSale}/>}</section>}
+      {!loading && page === "Reports" && <section className="panel data-panel"><div className="panel-heading section-toolbar"><div><h2>Sales report</h2><p className="subtitle">Download the transactions currently shown as a CSV file.</p></div><button className="register-button" onClick={exportCsv}>↓ Export CSV</button></div><div className="report-filters"><label>From<input type="date" value={reportFrom} onChange={e => setReportFrom(e.target.value)}/></label><label>To<input type="date" value={reportTo} onChange={e => setReportTo(e.target.value)}/></label><button className="text-action" onClick={() => { setReportFrom(""); setReportTo(""); }}>Clear dates</button></div><div className="report-totals"><span>{filteredSales.length} transactions · {filteredSales.filter(s => s.status === "completed").length} completed</span><strong>{money(filteredSales.filter(s => s.status === "completed").reduce((sum, s) => sum + Number(s.total), 0))}</strong></div>{salesLoading ? <p className="empty-note">Loading report data…</p> : <SaleList sales={filteredSales} detailed onCancel={cancelSale}/>}</section>}
+      {!loading && page === "POS Register" && <section className="pos-start panel"><div className="pos-glyph">▣</div><h2>Ready to serve</h2><p>Start a transaction, add products to the basket and select a customer if needed.</p><button className="register-button" onClick={() => setModal("sale")}>＋ Start a sale</button></section>}
+      <footer className="page-footer">LinkPOS · {new Date().getFullYear()} · Data provided by your POS API</footer>
+    </main>
+    {modal && <div className="modal-backdrop" onClick={() => !busy && setModal(null)}><form className={`sale-modal ${modal === "sale" ? "wide-modal" : ""}`} onSubmit={modal === "sale" ? completeSale : modal === "product" ? submitProduct : submitCustomer} onClick={e => e.stopPropagation()}><div className="panel-heading"><div><p className="eyebrow">{modal === "sale" ? "CHECKOUT" : "RECORDS"}</p><h2>{modal === "sale" ? "New sale" : modal === "product" ? "Add product" : "Add customer"}</h2></div><button type="button" className="modal-close" onClick={() => setModal(null)} aria-label="Close">×</button></div>
+      {modal === "sale" && <><div className="cart-add"><label>Product<select value={cartProduct} onChange={e => setCartProduct(e.target.value)}><option value="">Choose product</option>{available.map(p => <option value={p.id} key={p.id}>{p.name} · {money(p.selling_price)} · {p.stock_quantity} in stock</option>)}</select></label><label>Qty<input type="number" min={1} value={cartQuantity} onChange={e => setCartQuantity(Math.max(1, Number(e.target.value) || 1))}/></label><button type="button" className="register-button" onClick={addToCart}>Add</button></div><label>Customer<select value={saleCustomer} onChange={e => setSaleCustomer(e.target.value)}><option value="">Walk-in customer</option>{customers.filter(c => c.is_active).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select></label><div className="cart-lines">{cart.map(line => <div className="cart-line" key={line.product.id}><span><strong>{line.product.name}</strong><small>{line.quantity} × {money(line.product.selling_price)}</small></span><b>{money(Number(line.product.selling_price) * line.quantity)}</b><button type="button" onClick={() => setCart(cart.filter(x => x.product.id !== line.product.id))} aria-label={`Remove ${line.product.name}`}>×</button></div>)}{!cart.length && <p className="empty-note">Your basket is empty. Add a product above.</p>}</div><div className="sale-total"><span>Subtotal</span><strong>{money(subtotal)}</strong></div><div className="sale-total"><span>Tax ({(TAX_RATE * 100).toLocaleString()}%)</span><strong>{money(subtotal * TAX_RATE)}</strong></div><div className="sale-total grand-total"><span>Total due</span><strong>{money(subtotal * (1 + TAX_RATE))}</strong></div><button className="submit-sale" type="submit" disabled={busy || !cart.length}>{busy ? "Saving sale…" : "Complete sale"}</button></>}
+      {modal === "product" && <><label>Product name<input required maxLength={200} value={productDraft.name} onChange={e => setProductDraft({ ...productDraft, name: e.target.value })}/></label><label>SKU<input required maxLength={50} value={productDraft.sku} onChange={e => setProductDraft({ ...productDraft, sku: e.target.value })}/></label><label>Category<input required value={productDraft.category} onChange={e => setProductDraft({ ...productDraft, category: e.target.value })}/></label><div className="form-two"><label>Cost price<input required type="number" min="0" step="0.01" value={productDraft.cost_price} onChange={e => setProductDraft({ ...productDraft, cost_price: e.target.value })}/></label><label>Selling price<input required type="number" min="0" step="0.01" value={productDraft.selling_price} onChange={e => setProductDraft({ ...productDraft, selling_price: e.target.value })}/></label></div><div className="form-two"><label>Stock quantity<input required type="number" min="0" step="1" value={productDraft.stock_quantity} onChange={e => setProductDraft({ ...productDraft, stock_quantity: Number(e.target.value) })}/></label><label>Reorder level<input required type="number" min="0" step="1" value={productDraft.reorder_level} onChange={e => setProductDraft({ ...productDraft, reorder_level: Number(e.target.value) })}/></label></div><button className="submit-sale" disabled={busy}>{busy ? "Saving…" : editingProductId ? "Update product" : "Save product"}</button></>}
+      {modal === "customer" && <><label>Customer name<input required maxLength={200} value={customerDraft.name} onChange={e => setCustomerDraft({ ...customerDraft, name: e.target.value })}/></label><label>Phone<input type="tel" maxLength={30} value={customerDraft.phone} onChange={e => setCustomerDraft({ ...customerDraft, phone: e.target.value })}/></label><label>Email<input type="email" value={customerDraft.email} onChange={e => setCustomerDraft({ ...customerDraft, email: e.target.value })}/></label><button className="submit-sale" disabled={busy}>{busy ? "Saving…" : editingCustomerId ? "Update customer" : "Save customer"}</button></>}
+    </form></div>}
+  </div>;
 }
+
+function Metric({ title, value, icon, tone }: { title: string; value: string | number; icon: string; tone: string }) { return <article className="metric-card"><span className="metric-rule"/><div><p>{title}</p><strong>{value}</strong></div><span className={`metric-icon ${tone}`}>{icon}</span></article>; }
+function Toolbar({ search, setSearch, placeholder }: { search: string; setSearch: (value: string) => void; placeholder: string }) { return <div className="table-toolbar"><input type="search" placeholder={placeholder} value={search} onChange={e => setSearch(e.target.value)}/></div>; }
+function DataTable({ headers, children }: { headers: string[]; children: React.ReactNode }) { return <div className="table-wrap"><table><thead><tr>{headers.map(h => <th key={h}>{h}</th>)}</tr></thead><tbody>{children}</tbody></table></div>; }
+function SaleList({ sales, detailed = false, onCancel }: { sales: Sale[]; detailed?: boolean; onCancel?: (sale: Sale) => void }) { if (!sales.length) return <p className="empty-note">No sales match this view yet.</p>; return <div className="sale-list">{sales.map(s => <details className="sale-record" key={s.id}><summary className="sale-row"><div><strong>{s.invoice_number}</strong><span>{s.customer_name} · {new Date(s.sold_at).toLocaleString()}</span></div><b>{money(s.total)}</b></summary>{detailed && <div className="sale-detail"><p>Subtotal {money(s.subtotal)} · Tax {money(s.tax_amount)} · <span className={`status-badge ${s.status === "completed" ? "success" : "muted"}`}>{s.status}</span>{onCancel && s.status === "completed" && <button className="text-action" onClick={() => onCancel(s)}>Cancel sale &amp; restock</button>}</p>{s.items.map(item => <div className="sale-item" key={item.id}><span>{item.product_name} ({item.product_sku}) × {item.quantity}</span><strong>{money(item.line_total)}</strong></div>)}</div>}</details>)}</div>; }
 
 export default App;
