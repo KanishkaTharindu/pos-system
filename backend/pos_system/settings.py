@@ -73,6 +73,7 @@ DATABASES = {
 POS_TAX_RATE = Decimal(env("POS_TAX_RATE", default="0.10"))
 if POS_TAX_RATE < 0 or POS_TAX_RATE > 1:
     raise ValueError("POS_TAX_RATE must be between 0 and 1.")
+POS_REQUIRE_OPEN_SHIFT = env.bool("POS_REQUIRE_OPEN_SHIFT", default=False)
 
 AUTH_PASSWORD_VALIDATORS = [
     {
@@ -95,7 +96,21 @@ USE_I18N = True
 USE_TZ = True
 
 STATIC_URL = "/static/"
+MEDIA_URL = "/media/"
+MEDIA_ROOT = BASE_DIR / "media"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+EMAIL_BACKEND = env("EMAIL_BACKEND", default="django.core.mail.backends.smtp.EmailBackend")
+EMAIL_HOST = env("EMAIL_HOST", default="")
+EMAIL_PORT = env.int("EMAIL_PORT", default=587)
+EMAIL_HOST_USER = env("EMAIL_HOST_USER", default="")
+EMAIL_HOST_PASSWORD = env("EMAIL_HOST_PASSWORD", default="")
+EMAIL_USE_TLS = env.bool("EMAIL_USE_TLS", default=True)
+EMAIL_USE_SSL = env.bool("EMAIL_USE_SSL", default=False)
+EMAIL_TIMEOUT = env.int("EMAIL_TIMEOUT", default=15)
+DEFAULT_FROM_EMAIL = env("DEFAULT_FROM_EMAIL", default="")
+if EMAIL_USE_TLS and EMAIL_USE_SSL:
+    raise ValueError("Configure either EMAIL_USE_TLS or EMAIL_USE_SSL, not both.")
 
 CORS_ALLOWED_ORIGINS = env.list(
     "CORS_ALLOWED_ORIGINS",
